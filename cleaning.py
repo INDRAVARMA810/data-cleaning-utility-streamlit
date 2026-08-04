@@ -1,15 +1,11 @@
-"""Data cleaning functions.
+"""Data processing functions for the Smart Data Cleaning Utility.
 
-Every function here follows the same pattern:
+This file holds everything that touches the data. It contains no Streamlit
+code at all, which means these functions can be tested, reused in a notebook,
+or called from a plain script without a web app running.
 
-    take a DataFrame  ->  return (new DataFrame, message describing what changed)
-
-Two rules make the whole app easy to reason about:
-
-1. Nothing is changed in place. Each function works on a copy, so the caller
-   decides whether to keep the result. That is what makes "Undo" possible.
-2. No Streamlit code lives in this file. These are plain pandas functions, so
-   they can be tested, reused, or called from a notebook on their own.
+Milestone 2 covers loading a CSV and describing what is inside it.
+Cleaning functions will be added in a later milestone.
 """
 
 import pandas as pd
@@ -19,217 +15,113 @@ import pandas as pd
 
 
 def load_csv(uploaded_file):
-    """Read an uploaded CSV into a DataFrame."""
-    return pd.read_csv(uploaded_file)
+    """Read an uploaded CSV file into a DataFrame.
 
+    Reading a file the user chose can fail in many ways, so instead of
+    crashing this function always returns the same pair:
 
-# ---------------------------------------------------------------- duplicates
+        (DataFrame, None)             when the file was read successfully
+        (None, "explanation")         when something went wrong
 
-
-def count_duplicates(df, subset=None):
-    """How many rows are duplicates of an earlier row."""
-    return int(df.duplicated(subset=subset).sum())
-
-
-def remove_duplicates(df, subset=None):
-    """Keep the first copy of each row and drop the rest.
-
-    `subset` limits the comparison to certain columns - useful when two rows
-    describe the same customer but disagree on a timestamp.
+    The caller checks which one it got and shows the message. Returning the
+    error instead of raising it keeps all the "what do we tell the user"
+    decisions in app.py, where the user interface lives.
     """
-    removed = count_duplicates(df, subset=subset)
-    cleaned = df.drop_duplicates(subset=subset, keep="first").reset_index(drop=True)
+    if uploaded_file is None:
+        return None, "No file was provided."
 
-    where = f" (comparing {', '.join(subset)})" if subset else ""
-    return cleaned, f"Removed {removed} duplicate row(s){where}"
+    # Streamlit's uploader is already restricted to .csv, but a filename can
+    # still arrive from somewhere else, so check it here too.
+    if not uploaded_file.name.lower().endswith(".csv"):
+        return None, (
+            f"'{uploaded_file.name}' is not a CSV file. "
+            "Please upload a file ending in .csv"
+        )
+
+    try:
+        # A file object remembers how far it has been read. Rewinding to the
+        # start means a second read attempt sees the whole file, not nothing.
+        uploaded_file.seek(0)
+        df = pd.read_csv(uploaded_file)
+
+    except pd.errors.EmptyDataError:
+        # The file has no content at all - not even a header row.
+        return None, "This file is empty. Please upload a CSV that contains data."
+
+    except pd.errors.ParserError as error:
+        # The file has content, but the rows do not line up into a table.
+        # Usually a stray comma or an unclosed quotation mark.
+        return None, (
+            "This file could not be read as a CSV. Check for stray commas or "
+            f"unclosed quotation marks.\n\nDetails: {error}"
+        )
+
+    except UnicodeDecodeError:
+        # The bytes are not valid UTF-8, which usually means the file is not
+        # really text - an Excel file renamed to .csv, for example.
+        return None, (
+            "This file is not readable as text. If it was created in Excel, "
+            "use 'Save As' and choose 'CSV UTF-8'."
+        )
+
+    except Exception as error:
+        # A catch-all so an unexpected problem still produces a friendly
+        # message rather than a red traceback in the middle of the page.
+        return None, f"Something went wrong while reading the file: {error}"
+
+    # Reading succeeded, but the result may still be unusable.
+    if df.columns.empty:
+        return None, "No columns were found in this file."
+
+    if df.empty:
+        return None, "This file has column headings but no rows of data."
+
+    return df, None
 
 
-# ---------------------------------------------------------------- missing values
+# ---------------------------------------------------------------- describing
 
 
-def missing_summary(df):
-    """A small table of how many values each column is missing."""
-    missing = df.isna().sum()
-    summary = pd.DataFrame(
-        {
-            "Column": missing.index,
-            "Missing": missing.values,
-            "Missing %": (missing.values / len(df) * 100).round(1) if len(df) else 0,
-            "Type": [str(df[column].dtype) for column in df.columns],
-        }
-    )
-    return summary.sort_values("Missing", ascending=False).reset_index(drop=True)
+def get_dataset_info(df):
+    """Return the headline numbers shown at the top of the page.
 
-
-def drop_rows_with_missing(df, columns=None):
-    """Delete rows that have a missing value in the given columns."""
-    before = len(df)
-    cleaned = df.dropna(subset=columns).reset_index(drop=True)
-    removed = before - len(cleaned)
-
-    where = f" in {', '.join(columns)}" if columns else ""
-    return cleaned, f"Dropped {removed} row(s) with missing values{where}"
-
-
-def fill_missing(df, column, method, custom_value=None):
-    """Fill the gaps in one column.
-
-    method is one of: "mean", "median", "mode", "zero", "custom".
-    Mean and median only make sense for numbers, so the caller should offer
-    them for numeric columns only.
+    A dictionary is used rather than two separate values so more facts can be
+    added later without changing everywhere this function is called.
     """
-    cleaned = df.copy()
-    missing_before = int(cleaned[column].isna().sum())
-
-    if missing_before == 0:
-        return cleaned, f"'{column}' had no missing values"
-
-    if method == "mean":
-        value = cleaned[column].mean()
-    elif method == "median":
-        value = cleaned[column].median()
-    elif method == "mode":
-        modes = cleaned[column].mode()
-        if modes.empty:
-            return cleaned, f"'{column}' is entirely empty, so there is no mode to fill with"
-        value = modes.iloc[0]
-    elif method == "zero":
-        value = 0
-    else:  # "custom"
-        value = custom_value
-
-    cleaned[column] = cleaned[column].fillna(value)
-    return cleaned, f"Filled {missing_before} missing value(s) in '{column}' with {method} ({value})"
-
-
-# ---------------------------------------------------------------- column operations
-
-
-def drop_columns(df, columns):
-    """Remove columns you do not need."""
-    cleaned = df.drop(columns=columns)
-    return cleaned, f"Dropped column(s): {', '.join(columns)}"
-
-
-def rename_column(df, old_name, new_name):
-    """Give one column a different name."""
-    cleaned = df.rename(columns={old_name: new_name})
-    return cleaned, f"Renamed '{old_name}' to '{new_name}'"
-
-
-def clean_column_names(df):
-    """Turn messy headers into simple lowercase names.
-
-    "  Customer Name " becomes "customer_name", which is far easier to type
-    and works as a Python attribute.
-    """
-    cleaned = df.copy()
-    old_names = list(cleaned.columns)
-
-    new_names = (
-        pd.Index(old_names)
-        .astype(str)
-        .str.strip()
-        .str.lower()
-        .str.replace(r"[^\w\s]", "", regex=True)   # drop punctuation
-        .str.replace(r"\s+", "_", regex=True)      # spaces become underscores
-    )
-    cleaned.columns = new_names
-
-    changed = sum(1 for old, new in zip(old_names, new_names) if old != new)
-    return cleaned, f"Cleaned {changed} column name(s)"
-
-
-def strip_whitespace(df):
-    """Trim leading/trailing spaces from every text column.
-
-    " Austin " and "Austin" look identical on screen but count as two different
-    values, so this quietly fixes a lot of duplicate and grouping problems.
-    """
-    cleaned = df.copy()
-    text_columns = cleaned.select_dtypes(include="object").columns
-    for column in text_columns:
-        cleaned[column] = cleaned[column].str.strip()
-
-    return cleaned, f"Trimmed whitespace in {len(text_columns)} text column(s)"
-
-
-def change_case(df, column, case):
-    """Make a text column all lower, upper or Title Case."""
-    cleaned = df.copy()
-
-    if case == "lower":
-        cleaned[column] = cleaned[column].str.lower()
-    elif case == "UPPER":
-        cleaned[column] = cleaned[column].str.upper()
-    else:  # "Title"
-        cleaned[column] = cleaned[column].str.title()
-
-    return cleaned, f"Changed '{column}' to {case} case"
-
-
-def convert_type(df, column, new_type):
-    """Convert a column to number, text or date.
-
-    Values that cannot be converted become missing (NaN) rather than raising an
-    error, so one bad cell does not stop the whole conversion.
-    """
-    cleaned = df.copy()
-
-    if new_type == "number":
-        cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce")
-    elif new_type == "date":
-        cleaned[column] = pd.to_datetime(cleaned[column], errors="coerce")
-    else:  # "text"
-        cleaned[column] = cleaned[column].astype(str)
-
-    failed = int(cleaned[column].isna().sum() - df[column].isna().sum())
-    note = f", {failed} value(s) could not be converted" if failed > 0 else ""
-    return cleaned, f"Converted '{column}' to {new_type}{note}"
-
-
-# ---------------------------------------------------------------- statistics
-
-
-def overview(df):
-    """The handful of numbers shown at the top of the app."""
     return {
         "rows": len(df),
         "columns": df.shape[1],
-        "missing": int(df.isna().sum().sum()),
-        "duplicates": count_duplicates(df),
-        "memory_kb": round(float(df.memory_usage(deep=True).sum()) / 1024, 1),
     }
 
 
-def numeric_summary(df):
-    """describe() for the numeric columns, or None when there are none."""
-    numeric = df.select_dtypes(include="number")
-    if numeric.empty:
-        return None
-    return numeric.describe().T.round(2)
+def get_column_info(df):
+    """Build a small table listing every column and its data type.
+
+    pandas stores each column's type as a dtype such as int64 or object.
+    Those names mean little to most people, so friendly_type() translates
+    them before they are displayed.
+    """
+    return pd.DataFrame(
+        {
+            "Column": [str(column) for column in df.columns],
+            "Data Type": [friendly_type(df[column]) for column in df.columns],
+            "pandas dtype": [str(df[column].dtype) for column in df.columns],
+        }
+    )
 
 
-def text_summary(df):
-    """Count and most common value for each text column."""
-    text = df.select_dtypes(include="object")
-    if text.empty:
-        return None
+def friendly_type(series):
+    """Describe one column's type in plain English.
 
-    rows = []
-    for column in text.columns:
-        values = text[column].dropna()
-        rows.append(
-            {
-                "Column": column,
-                "Unique values": values.nunique(),
-                "Most common": values.mode().iloc[0] if not values.mode().empty else "-",
-                "Count": int(values.value_counts().iloc[0]) if not values.empty else 0,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-def to_csv_bytes(df):
-    """Turn the DataFrame into bytes for Streamlit's download button."""
-    return df.to_csv(index=False).encode("utf-8")
+    pandas reports text columns as 'object', which is accurate but confusing,
+    so each dtype family is given a readable name instead.
+    """
+    if pd.api.types.is_bool_dtype(series):
+        return "True/False"
+    if pd.api.types.is_integer_dtype(series):
+        return "Whole number"
+    if pd.api.types.is_float_dtype(series):
+        return "Decimal number"
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return "Date/time"
+    return "Text"
