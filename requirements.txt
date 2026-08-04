@@ -1,0 +1,3 @@
+# streamlit >=1.50 is required for the width="stretch" argument used in app.py
+streamlit>=1.50
+pandas>=2.0
