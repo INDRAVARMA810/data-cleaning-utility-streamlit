@@ -287,3 +287,81 @@ def get_column_details(df):
         )
 
     return pd.DataFrame(rows, columns=headings)
+# ==============================
+# Milestone 4: Data Cleaning
+# ==============================
+
+def _is_text_column(series):
+    """
+    Check whether a pandas Series contains text values.
+    Supports both object and StringDtype.
+    """
+    return (
+        series.dtype == "object"
+        or str(series.dtype).startswith("string")
+    )
+
+
+def clean_column_names(df):
+    """
+    Clean column names:
+    - remove leading/trailing spaces
+    - convert to lowercase
+    - replace spaces with underscores
+    """
+
+    cleaned = df.copy()
+
+    cleaned.columns = (
+        cleaned.columns
+        .str.strip()
+        .str.lower()
+        .str.replace(" ", "_")
+    )
+
+    return cleaned, "Column names cleaned successfully"
+def trim_whitespace(df):
+    """
+    Remove leading and trailing whitespace from text columns.
+    """
+    cleaned = df.copy()
+
+    text_columns = [
+        column for column in cleaned.columns
+        if _is_text_column(cleaned[column])
+    ]
+
+    for column in text_columns:
+        cleaned[column] = cleaned[column].str.strip()
+
+    return (
+        cleaned,
+        f"Trimmed whitespace from {len(text_columns)} text column(s)"
+    )
+def count_duplicates(df, subset=None):
+    """
+    Count duplicate rows.
+
+    If subset is provided, duplicates are checked only
+    using those columns.
+    """
+    if df.empty:
+        return 0
+
+    return int(df.duplicated(subset=subset).sum())
+
+
+def remove_duplicates(df, subset=None):
+    """
+    Remove duplicate rows, keeping the first occurrence.
+    """
+    cleaned = df.copy()
+
+    before = len(cleaned)
+    cleaned = cleaned.drop_duplicates(subset=subset)
+    removed = before - len(cleaned)
+
+    return (
+        cleaned,
+        f"Removed {removed} duplicate row(s)"
+    )
